@@ -1,0 +1,5 @@
+{
+  "about": "The agent fixes one bug and declares victory. 'Done' should be checked, not believed.",
+  "prompt": "Some statistics functions in src/stats.py are wrong. Make all the tests in tests/ pass.",
+  "checks": {"tests": true}
+}

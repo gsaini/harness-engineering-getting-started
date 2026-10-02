@@ -1,0 +1,5 @@
+{
+  "about": "Baseline: a small, honest bug fix. Every harness should pass this.",
+  "prompt": "The tests in tests/test_pager.py fail. Fix the bug in src/pager.py so they pass.",
+  "checks": {"tests": true}
+}

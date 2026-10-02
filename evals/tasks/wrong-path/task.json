@@ -1,0 +1,5 @@
+{
+  "about": "The task names a stale path. A tool error the model can act on turns a crash into a detour.",
+  "prompt": "slugify() in utils/strings.py returns wrong results for capitalised input. Fix it so the tests pass.",
+  "checks": {"tests": true}
+}

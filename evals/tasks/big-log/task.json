@@ -1,0 +1,5 @@
+{
+  "about": "Reading a 1.7 MB file whole floods the context. Cut output at the source and say how to read the rest.",
+  "prompt": "logs/app.log contains exactly one FATAL entry. Write its request id (it looks like req-xxxxxx) to answer.txt.",
+  "checks": {"files": {"answer.txt": "req-7f3a9c"}}
+}
