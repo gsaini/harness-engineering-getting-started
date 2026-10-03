@@ -21,6 +21,7 @@ from harness.guard import Guard
 
 MAX_LIST = 300
 MAX_MATCHES = 40
+SKIP_DIRS = {"__pycache__", ".pytest_cache"}
 
 
 @dataclass
@@ -36,7 +37,6 @@ class Tool:
     description: str
     params: dict[str, Param]
     fn: Callable[..., str]
-    parallel_safe: bool = False
     meta: dict = field(default_factory=dict)
 
     def schema(self) -> dict:
@@ -72,16 +72,24 @@ class Tool:
 
 
 class Workspace:
-    """Everything the tools need: where to work and what the agent may touch."""
+    """Everything the tools need: where to work, what the agent may touch, and (v5)
+    which tests a verified run has to account for."""
 
-    def __init__(self, root: Path, floor: Path, guard: bool):
+    def __init__(self, root: Path, floor: Path, guard: bool, tests: frozenset[str] | None = None):
         self.root = root.resolve()
         self.guard = Guard(self.root, floor, enabled=guard)
+        # Test ids collected before the agent acted. None means "trust pytest's exit code".
+        self.tests = tests
 
     def similar_paths(self, path: str) -> list[str]:
-        files = [p.relative_to(self.root).as_posix() for p in self.root.rglob("*") if p.is_file()]
+        files = [p.relative_to(self.root).as_posix() for p in _files(self.root)]
         by_name = [f for f in files if Path(f).name == Path(path).name]
         return by_name or difflib.get_close_matches(path, files, n=3, cutoff=0.4)
+
+
+def _files(base: Path) -> list[Path]:
+    """Every file under `base`, sorted, skipping caches."""
+    return sorted(p for p in base.rglob("*") if p.is_file() and not SKIP_DIRS & set(p.parts))
 
 
 def build_tools(ws: Workspace, *, finish: bool, remember: bool) -> list[Tool]:
@@ -89,15 +97,13 @@ def build_tools(ws: Workspace, *, finish: bool, remember: bool) -> list[Tool]:
         base = ws.guard.resolve(path)
         if not base.is_dir():
             raise ToolError(f"{path} is not a directory.")
-        files = sorted(
-            p.relative_to(ws.root).as_posix()
-            for p in base.rglob("*")
-            if p.is_file() and "__pycache__" not in p.parts and ".pytest_cache" not in p.parts
-        )
+        files = [p.relative_to(ws.root).as_posix() for p in _files(base)]
         more = f"\n… and {len(files) - MAX_LIST} more" if len(files) > MAX_LIST else ""
         return "\n".join(files[:MAX_LIST]) + more or "(empty)"
 
     def read_file(path: str, offset: int = 1, limit: int = 0) -> str:
+        if offset < 1 or limit < 0:
+            raise ToolError("offset must be at least 1 and limit at least 0 (0 means to the end of the file).")
         target = ws.guard.resolve(path)
         if not target.is_file():
             hint = ws.similar_paths(path)
@@ -135,7 +141,7 @@ def build_tools(ws: Workspace, *, finish: bool, remember: bool) -> list[Tool]:
         except re.error as exc:
             raise ToolError(f"Invalid regular expression {pattern!r}: {exc}.") from exc
         base = ws.guard.resolve(path)
-        files = [base] if base.is_file() else sorted(p for p in base.rglob("*") if p.is_file())
+        files = [base] if base.is_file() else _files(base)
         hits: list[str] = []
         total = 0
         for file in files:
@@ -155,7 +161,7 @@ def build_tools(ws: Workspace, *, finish: bool, remember: bool) -> list[Tool]:
         return f"{total} match(es):\n" + "\n".join(hits) + more
 
     def run_tests() -> str:
-        return run_test_suite(ws.root)[1]
+        return run_test_suite(ws.root, expect=ws.tests).output
 
     tools = [
         Tool(
@@ -163,7 +169,6 @@ def build_tools(ws: Workspace, *, finish: bool, remember: bool) -> list[Tool]:
             "List files under a directory of the workspace.",
             {"path": Param(str, "Directory relative to the workspace root (default '.').", False)},
             list_files,
-            parallel_safe=True,
         ),
         Tool(
             "read_file",
@@ -174,7 +179,6 @@ def build_tools(ws: Workspace, *, finish: bool, remember: bool) -> list[Tool]:
                 "limit": Param(int, "Maximum number of lines; 0 means to the end.", False),
             },
             read_file,
-            parallel_safe=True,
         ),
         Tool(
             "write_file",
@@ -203,7 +207,6 @@ def build_tools(ws: Workspace, *, finish: bool, remember: bool) -> list[Tool]:
                 "path": Param(str, "File or directory to search (default '.').", False),
             },
             search,
-            parallel_safe=True,
         ),
         Tool("run_tests", "Run the project's test suite (pytest) and return the summary.", {}, run_tests),
     ]
@@ -230,23 +233,77 @@ def build_tools(ws: Workspace, *, finish: bool, remember: bool) -> list[Tool]:
     return tools
 
 
-def run_test_suite(root: Path, timeout: int = 120) -> tuple[bool, str]:
-    """Run pytest in `root`. Returns (passed, summary text)."""
-    # No bytecode caches: an edit that keeps a file's size within the same second can
-    # otherwise leave a stale .pyc in place, and the tests would check old code.
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+# --- Running the tests ---------------------------------------------------------------
+
+PYTEST = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--no-header"]
+
+
+@dataclass(frozen=True)
+class TestReport:
+    passed: bool
+    output: str  # written for the model
+    missing: tuple[str, ...] = ()  # expected tests that were not reported as passed (evidence mode)
+    returncode: int = 0
+
+
+def collect_tests(root: Path, timeout: int = 60) -> frozenset[str]:
+    """The tests pytest would run in `root`, as node ids.
+
+    Taken before the agent acts, this is the inventory a verified run has to account
+    for (v5): a test that was there at the start must be reported passing at the end.
+    """
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--no-header"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
+            [*PYTEST, "--collect-only"], cwd=root, capture_output=True, text=True, timeout=timeout, env=_pytest_env()
         )
     except subprocess.TimeoutExpired:
-        return False, f"Tests timed out after {timeout}s."
+        return frozenset()
+    return frozenset(line.strip() for line in proc.stdout.splitlines() if "::" in line)
+
+
+def run_test_suite(root: Path, timeout: int = 120, *, expect: frozenset[str] | None = None) -> TestReport:
+    """Run pytest in `root`.
+
+    Without `expect`, the exit code is trusted (v0–v4): 0 passes, and 5 (no tests
+    collected) counts as nothing to verify. With `expect` — the ids collected at the
+    start of the run — passing needs evidence: every one of them reported PASSED. A
+    module that skips itself, or ends the process early with exit code 0, is caught.
+    """
+    args = PYTEST if expect is None else [*PYTEST, "-rA"]  # -rA: one line per test outcome, to check off
+    try:
+        proc = subprocess.run(args, cwd=root, capture_output=True, text=True, timeout=timeout, env=_pytest_env())
+    except subprocess.TimeoutExpired:
+        return TestReport(False, f"Tests timed out after {timeout}s.", tuple(sorted(expect or ())), returncode=-1)
     output = (proc.stdout + proc.stderr).strip()
-    if proc.returncode == 5:  # pytest: no tests collected — nothing to verify, not a failure
-        return True, "No tests to run."
-    return proc.returncode == 0, output[-4_000:]
+    if expect is None:
+        if proc.returncode == 5:
+            return TestReport(True, "No tests to run.", returncode=5)
+        return TestReport(proc.returncode == 0, output[-4_000:], returncode=proc.returncode)
+
+    reported = frozenset(line[len("PASSED ") :].strip() for line in output.splitlines() if line.startswith("PASSED "))
+    missing = tuple(sorted(expect - reported))
+    banners = {"PASSES", "short test summary info"}  # -rA adds these; the model needs the outcomes, not the headings
+    summary = "\n".join(
+        line for line in output.splitlines() if not (line.startswith("PASSED ") or line.strip("= ") in banners)
+    )[-4_000:]
+    if missing:
+        shown = "\n".join(f"  {test}" for test in missing[:20])
+        if len(missing) > 20:
+            shown += f"\n  … and {len(missing) - 20} more"
+        text = (
+            f"{len(missing)} of {len(expect)} tests collected at the start of this run were not reported as passed:\n"
+            f"{shown}\n{summary or f'(pytest exited with code {proc.returncode} and no output)'}\n"
+            "Every test must run and pass; skipping tests or ending the process early does not count."
+        )
+        return TestReport(False, text, missing, proc.returncode)
+    return TestReport(proc.returncode in (0, 5), summary or "No tests to run.", returncode=proc.returncode)
+
+
+def _pytest_env() -> dict[str, str]:
+    """The environment for pytest, which runs whatever code the agent wrote: no API
+    credentials for that code to read, and no bytecode caches (an edit that keeps a
+    file's size within the same second can otherwise leave a stale .pyc in place, and
+    the tests would check old code)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env

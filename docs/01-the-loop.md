@@ -9,7 +9,7 @@ loop:
     messages += response                           # verbatim — never edited later
     stop_reason?  refusal → stop · max_tokens → stop · pause_turn → resume
     no tool calls → done (v0–v1) · nudge to call `finish` (v2+)
-    run every tool call → messages += all results, in one turn
+    run every tool call, `finish` last → messages += all results, in one turn
 ```
 
 ## Four rules that look small and aren't

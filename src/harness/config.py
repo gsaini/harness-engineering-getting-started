@@ -25,6 +25,9 @@ class HarnessConfig:
     #     more, and the agent can save lessons for future runs.
     truncate_outputs: bool = False
     memory: bool = False
+    # v5: a passing test run needs evidence — every test collected at the start of
+    #     the run reported as passed — not just an exit code of zero.
+    require_evidence: bool = False
 
     # Lab safety, on in every version (not a lesson — it keeps experiments cheap):
     max_steps: int = 30
@@ -49,5 +52,11 @@ _V4 = replace(
     truncate_outputs=True,
     memory=True,
 )
+_V5 = replace(
+    _V4,
+    name="v5",
+    description="+ evidence: every test seen at the start must be seen passing, not just exit code 0",
+    require_evidence=True,
+)
 
-VERSIONS: dict[str, HarnessConfig] = {c.name: c for c in (_V0, _V1, _V2, _V3, _V4)}
+VERSIONS: dict[str, HarnessConfig] = {c.name: c for c in (_V0, _V1, _V2, _V3, _V4, _V5)}

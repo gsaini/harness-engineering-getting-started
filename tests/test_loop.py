@@ -93,9 +93,9 @@ def test_tests_see_same_size_edits_made_within_one_second(workspace):
     (workspace / "pytest.ini").write_text("[pytest]\npythonpath = .\ntestpaths = tests\n")
     from harness.tools import run_test_suite
 
-    assert run_test_suite(workspace)[0] is False
+    assert run_test_suite(workspace).passed is False
     (workspace / "src" / "app.py").write_text("VALUE = 2\n")  # same size, same second
-    assert run_test_suite(workspace)[0] is True
+    assert run_test_suite(workspace).passed is True
 
 
 def test_verify_on_finish_bounces_failing_work(workspace):
@@ -132,3 +132,22 @@ def test_v4_truncates_large_output_at_the_source(workspace):
 def test_step_limit(workspace):
     model = FakeModel(*[message(tool_use("list_files")) for _ in range(40)])
     assert run_agent("loop forever", workspace, model, VERSIONS["v1"]).status == "step_limit"
+
+
+def test_finish_runs_after_the_other_calls_in_its_turn(workspace):
+    """Regression: `finish` verified the state *before* an edit requested in the same turn."""
+    (workspace / "tests" / "test_app.py").write_text(
+        "from src.app import VALUE\n\ndef test_value():\n    assert VALUE == 2\n"
+    )
+    (workspace / "pytest.ini").write_text("[pytest]\npythonpath = .\ntestpaths = tests\n")
+    model = FakeModel(
+        message(
+            tool_use("finish", summary="done"),
+            tool_use("edit_file", path="src/app.py", old="VALUE = 1", new="VALUE = 2"),
+        )
+    )
+    result = run_agent("bump VALUE", workspace, model, VERSIONS["v3"])
+    assert result.status == "done" and len(model.requests) == 1  # the edit was verified, not skipped
+    results_turn = result.messages[2]["content"]
+    calls = result.messages[1]["content"]
+    assert [r["tool_use_id"] for r in results_turn] == [c.id for c in calls]  # results keep the call order

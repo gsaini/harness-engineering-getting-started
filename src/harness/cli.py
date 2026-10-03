@@ -24,8 +24,14 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument(
         "--model", default="scripted", help="'scripted' (offline, free) or a Claude model id, e.g. claude-opus-5-5"
     )
-    ev.add_argument("--versions", default=",".join(VERSIONS), help="comma-separated, e.g. v0,v4")
+    ev.add_argument("--versions", default=",".join(VERSIONS), help="comma-separated, e.g. v0,v5")
     ev.add_argument("--tasks", help="comma-separated task ids (default: all)")
+    ev.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="runs per task and version (default 1); live runs are stochastic, so the scoreboard shows a pass rate",
+    )
     ev.add_argument("--effort", default="medium", help="low | medium | high | xhigh | max")
     ev.add_argument("--out", type=Path, default=Path("runs"), help="where traces and the scoreboard go")
     ev.add_argument("--yes", action="store_true", help="confirm real API calls for a Claude model")
@@ -33,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="run one task on a workspace directory")
     run.add_argument("task", help="what to do, in plain English")
     run.add_argument("--workspace", type=Path, required=True)
-    run.add_argument("--version", default="v4", choices=list(VERSIONS))
+    run.add_argument("--version", default="v5", choices=list(VERSIONS))
     run.add_argument("--model", default=DEFAULT_MODEL)
     run.add_argument("--effort", default="medium")
     run.add_argument("--trace", type=Path, default=Path("runs/run.jsonl"))
@@ -60,7 +66,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{result.status} after {result.steps} steps. {result.final_text or result.error}")
         print(f"trace: {args.trace}  (harness trace {args.trace})")
         return 0 if result.status == "done" else 1
-    return _eval(args)
+    try:
+        return _eval(args)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"harness eval: {exc}")
+        return 2
 
 
 def _has_credentials() -> bool:
@@ -75,21 +85,26 @@ NO_CREDENTIALS = "No Anthropic credentials found. Set ANTHROPIC_API_KEY (or run 
 
 
 def _eval(args: argparse.Namespace) -> int:
-    versions = [VERSIONS[v.strip()] for v in args.versions.split(",")]
-    tasks = load_tasks(args.tasks.split(",") if args.tasks else None)
+    names = [v.strip() for v in args.versions.split(",")]
+    if unknown := [v for v in names if v not in VERSIONS]:
+        raise ValueError(f"Unknown version(s): {', '.join(unknown)}. Available: {', '.join(VERSIONS)}.")
+    if args.repeat < 1:
+        raise ValueError("--repeat must be at least 1.")
+    versions = [VERSIONS[v] for v in names]
+    tasks = load_tasks([t.strip() for t in args.tasks.split(",")] if args.tasks else None)
     if args.model == "scripted":
 
         def make_model(task_id: str):
             return ScriptedModel(POLICIES[task_id])
     else:
-        runs = len(tasks) * len(versions)
+        runs = len(tasks) * len(versions) * args.repeat
         if not _has_credentials():
             print(NO_CREDENTIALS)
             return 2
         if not args.yes:
             print(
                 f"This makes real API calls with {args.model}: {runs} agent runs. "
-                "Start small (e.g. --tasks fix-pagination --versions v4), then re-run with --yes."
+                "Start small (e.g. --tasks fix-pagination --versions v5), then re-run with --yes."
             )
             return 2
 
@@ -97,9 +112,11 @@ def _eval(args: argparse.Namespace) -> int:
             return ClaudeModel(args.model, effort=args.effort)
 
     out = args.out / time.strftime("%Y%m%d-%H%M%S")
-    grades = run_eval(tasks, versions, make_model, out_dir=out)
+    grades = run_eval(tasks, versions, make_model, out_dir=out, repeat=args.repeat)
     board = scoreboard(grades, args.model)
     header = f"Model: `{args.model}`" + ("" if args.model == "scripted" else f" · effort `{args.effort}`")
+    if args.repeat > 1:
+        header += f" · {args.repeat} runs per cell"
     out.mkdir(parents=True, exist_ok=True)
     (out / "scoreboard.md").write_text(f"{header}\n\n{board}\n", encoding="utf-8")
     print(f"{header}\n\n{board}\n\nTraces and scoreboard: {out}")
