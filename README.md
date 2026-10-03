@@ -1,5 +1,3 @@
-<div align="center">
-
 # 🧰 Harness Engineering — Getting Started
 
 **Agent = Model + Harness.** A small agent harness built from scratch on the Claude API, plus the evals that show why each part exists: same model, same tasks — the harness alone takes the score from **1/6 to 6/6**.
@@ -10,8 +8,6 @@
 ![Anthropic SDK](https://img.shields.io/badge/anthropic-1.x-191919?style=for-the-badge)
 ![Offline](https://img.shields.io/badge/Tests%20%26%20evals-offline%2C%20free-16A34A?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-EAB308?style=for-the-badge)
-
-</div>
 
 ---
 
