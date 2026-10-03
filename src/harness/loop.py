@@ -17,7 +17,7 @@ from harness.config import HarnessConfig
 from harness.context import estimate_tokens, truncate
 from harness.errors import ToolError
 from harness.model import Model
-from harness.tools import Tool, Workspace, build_tools, run_test_suite
+from harness.tools import Tool, Workspace, build_tools, collect_tests, run_test_suite
 from harness.trace import Tracer
 
 SYSTEM = """You are a careful software engineer working in a small repository, your workspace.
@@ -66,7 +66,9 @@ def run_agent(
     tracer: Tracer | None = None,
 ) -> RunResult:
     tracer = tracer or Tracer(None)
-    ws = Workspace(workspace, floor or workspace, guard=config.guard)
+    # v5: take the test inventory before the agent touches anything; `finish` must account for it.
+    tests = collect_tests(workspace) if config.require_evidence else None
+    ws = Workspace(workspace, floor or workspace, guard=config.guard, tests=tests)
     tools = build_tools(ws, finish=config.finish_tool, remember=config.memory)
     by_name = {tool.name: tool for tool in tools}
     system = build_system(config, memory.load(ws.root) if config.memory else [])
@@ -120,15 +122,20 @@ def run_agent(
                 continue
             idle_turns = 0
 
-            tool_results, finished = [], None
-            for call in calls:
+            # `finish` runs after the turn's other calls, so it verifies the state they leave behind.
+            order = sorted(calls, key=lambda call: _is_finish(call, by_name))
+            results, finished = {}, None
+            for call in order:
                 output, is_error, finish = _execute(call, by_name, ws, config)
                 tracer.log("tool", step=step, name=call.name, input=call.input, output=_clip(output), is_error=is_error)
-                tool_results.append(
-                    {"type": "tool_result", "tool_use_id": call.id, "content": output, "is_error": is_error}
-                )
+                results[call.id] = {
+                    "type": "tool_result",
+                    "tool_use_id": call.id,
+                    "content": output,
+                    "is_error": is_error,
+                }
                 finished = finished or finish
-            messages.append({"role": "user", "content": tool_results})  # all results in one turn
+            messages.append({"role": "user", "content": [results[call.id] for call in calls]})  # one turn, in order
             if finished is not None:
                 return _end(result, tracer, "done", final_text=finished)
         return _end(result, tracer, "step_limit")
@@ -136,6 +143,11 @@ def run_agent(
         return _end(result, tracer, "api_error", error=f"{type(exc).__name__}: {exc}")
     except Exception as exc:  # the naive harness lets one bad tool call kill the run
         return _end(result, tracer, "crashed", error=f"{type(exc).__name__}: {exc}")
+
+
+def _is_finish(call, by_name: dict[str, Tool]) -> bool:
+    tool = by_name.get(call.name)
+    return bool(tool and tool.meta.get("finish"))
 
 
 def _execute(call, by_name: dict[str, Tool], ws: Workspace, config: HarnessConfig) -> tuple[str, bool, str | None]:
@@ -147,10 +159,10 @@ def _execute(call, by_name: dict[str, Tool], ws: Workspace, config: HarnessConfi
         args = tool.validate(call.input)
         if tool.meta.get("finish"):
             if config.verify_on_finish:
-                passed, output = run_test_suite(ws.root)
-                if not passed:
+                report = run_test_suite(ws.root, expect=ws.tests)
+                if not report.passed:
                     raise ToolError(
-                        f"Not done yet: the test suite fails.\n{output}\n\nFix the failures, then call finish again."
+                        f"Not done yet: the test suite fails.\n{report.output}\n\nFix the failures, then call finish again."
                     )
             return "Finished.", False, args["summary"]
         output = tool.fn(**args)

@@ -18,3 +18,5 @@ The model fixes `median()` and finishes for real.
 - **The verifier must not be the implementer.** The check is code the agent can't edit (tests are read-only since v2), not the model grading itself.
 - **Make verification hard to fool.** The evals caught a real bug here: after an edit that kept a file's size the same within one second, Python reused a stale `.pyc` and the tests checked the *old* code. The harness now runs tests with `PYTHONDONTWRITEBYTECODE=1`, and a regression test pins it.
 - **"No tests" isn't failure.** pytest exits with code 5 when nothing is collected; an early version treated that as a failing suite and bounced `finish` forever on a task with no tests.
+- **Verify the state the turn leaves behind.** `finish` runs after any other tool calls in its turn. An early version verified first, and an edit requested alongside `finish` went through unchecked.
+- **An exit code is a claim too.** v3 trusts pytest's exit code, and the code under test can buy one: a module that skips itself, or ends the process with `os._exit(0)`, is green here. [08 · Evidence](08-evidence.md) is the fix.

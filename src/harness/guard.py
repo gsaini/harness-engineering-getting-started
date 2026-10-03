@@ -14,7 +14,16 @@ from pathlib import Path
 
 from harness.errors import ToolError
 
-READ_ONLY = ("tests/*", ".harness/*", "pytest.ini", "conftest.py")  # fnmatch: * also matches "/"
+# Files that define the expected behaviour. The agent may read them, never write them,
+# and the eval grader restores them before grading. (fnmatch: * also matches "/")
+TESTS = ("tests/*", "pytest.ini", "conftest.py")
+# Also read-only: the harness's own state, which only the `remember` tool may write.
+READ_ONLY = TESTS + (".harness/*",)
+
+
+def is_test_file(rel: str) -> bool:
+    """Tests and test configuration (relative to the workspace root)."""
+    return any(fnmatch(rel, pattern) for pattern in TESTS)
 
 
 def is_read_only(rel: str) -> bool:

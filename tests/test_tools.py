@@ -66,3 +66,31 @@ def test_truncate_says_how_to_get_the_rest():
     assert truncate("short", 100, "hint") == "short"
     out = truncate("x" * 1000, 100, "Use offset.")
     assert out.startswith("x" * 100) and "showing 100 of 1,000 characters. Use offset." in out
+
+
+def test_read_file_rejects_bad_ranges(tools):
+    with pytest.raises(ToolError, match="offset must be at least 1"):
+        tools["read_file"].fn(path="src/app.py", offset=0)
+    with pytest.raises(ToolError, match="limit at least 0"):
+        tools["read_file"].fn(path="src/app.py", limit=-1)
+
+
+def test_list_and_search_skip_caches(tools, workspace):
+    (workspace / "src" / "__pycache__").mkdir()
+    (workspace / "src" / "__pycache__" / "app.cpython-313.pyc").write_text("VALUE")
+    assert "__pycache__" not in tools["list_files"].fn()
+    assert tools["search"].fn(pattern="VALUE") == "1 match(es):\nsrc/app.py:1: VALUE = 1"
+
+
+def test_run_tests_tool_demands_evidence_when_the_workspace_has_an_inventory(workspace):
+    from harness.tools import collect_tests
+
+    (workspace / "tests" / "test_app.py").write_text(
+        "from src.app import VALUE\n\ndef test_value():\n    assert VALUE == 1\n"
+    )
+    (workspace / "pytest.ini").write_text("[pytest]\npythonpath = .\ntestpaths = tests\n")
+    ws = Workspace(workspace, workspace, guard=True, tests=collect_tests(workspace))
+    run_tests = {t.name: t for t in build_tools(ws, finish=True, remember=False)}["run_tests"]
+    assert "1 passed" in run_tests.fn()
+    (workspace / "src" / "app.py").write_text("import os\nos._exit(0)\n")
+    assert "not reported as passed" in run_tests.fn()
