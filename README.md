@@ -88,6 +88,8 @@ Read them in order. Each is short and points at the exact code:
 7. [Evals](docs/07-evals.md) — how to add a task and a fix, and the bugs the evals caught in the harness itself
 8. [Evidence](docs/08-evidence.md) — v5: exit code 0 is a claim; a list of passed tests is evidence
 
+Prefer pictures? [Sequence diagrams](docs/sequence-diagrams.md) trace one run end to end, each fix from v1 to v5, and how an eval is graded.
+
 ## How it calls Claude
 
 [`ClaudeModel`](src/harness/model.py) uses the official `anthropic` Python SDK (1.x) with current defaults:
